@@ -115,20 +115,26 @@ The current design was validated on `xczu4ev-sfvc784-2-i`.
 
 ### 2. PS And DDR Configuration Source
 
-The script imports PS/DDR settings from an existing reference block design:
+The script imports PS/DDR settings from the local reference block design copied
+into this repository:
 
 ```tcl
-set ref_bd_file "<PATH_TO_REFERENCE_PS_BD>/design_1.bd"
+set ref_bd_file "./reference/design_1.bd"
 ```
 
+For this board, `reference/design_1.bd` contains the PS/DDR configuration used
+by the build script. Keeping this file in the repository makes the project
+self-contained and avoids depending on a developer-specific absolute path.
+
 For a different board, create or locate a known-good ZynqMP PS block design for
-that board, then point `ref_bd_file` to that `.bd` file. This reference design
-should already contain the correct DDR configuration, MIO settings, PS clocks,
-and fixed IO settings for the board.
+that board, copy its `.bd` file into `reference/`, and then point `ref_bd_file`
+to the copied file. This reference design should already contain the correct DDR
+configuration, MIO settings, PS clocks, and fixed IO settings for the board.
 
 If no reference BD is available, create one in Vivado first using the board's
 schematic and memory parameters, verify that PS DDR boots correctly, and then
-use that BD as the configuration source.
+use that BD as the configuration source. Copy it into this repository before
+building so the project remains portable.
 
 ### 3. DDR Capacity And Safe Test Range
 
@@ -1040,6 +1046,9 @@ build_pl_ps_ddr_mem_test.tcl
 
 program_bitstream.tcl
     JTAG programming script.
+
+reference/design_1.bd
+    Local reference PS/DDR block design used as the configuration source.
 
 rtl/pl_ps_ddr_mem_test_top.v
     Main DDR tester, AXI master, UART protocol parser, result sender.

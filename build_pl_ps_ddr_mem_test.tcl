@@ -3,7 +3,7 @@ set proj_name "pl_ps_ddr_mem_test"
 set proj_dir  "./pl_ps_ddr_mem_test_proj"
 set rtl_dir   "./rtl"
 set xdc_file  "./constraints/uart_zu4ev.xdc"
-set ref_bd_file "C:/Users/Administrator/Desktop/FPGA/XCZU4EV/XCZU4EV/XCZU4EV.srcs/sources_1/bd/design_1/design_1.bd"
+set ref_bd_file "./reference/design_1.bd"
 
 set test_base_addr "0x0000000010000000"
 set test_bytes     "0x01000000"
