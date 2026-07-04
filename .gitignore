@@ -1,0 +1,38 @@
+# Vivado generated project/output files
+pl_ps_ddr_mem_test_proj/
+.Xil/
+*.jou
+*.log
+*.backup.jou
+*.backup.log
+*.str
+*.pb
+*.wdb
+*.wcfg
+*.xpr
+*.runs/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.sim/
+*.gen/
+
+# Generated FPGA artifacts
+*.bit
+*.bin
+*.dcp
+*.ltx
+*.hwh
+*.hwdef
+*.rpt
+*.rpx
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
