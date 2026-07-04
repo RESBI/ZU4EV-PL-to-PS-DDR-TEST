@@ -28,7 +28,8 @@ Use this section when starting from a clean checkout.
 
 Prerequisites:
 
-- Vivado 2024.2 is installed at `Z:\Softwares\Xilinx\Vivado\2024.2`.
+- Vivado 2024.2 is installed. In the examples below, replace `<VIVADO_INSTALL>`
+  with your Vivado installation directory, for example `C:\Xilinx\Vivado\2024.2`.
 - Python 3 is installed.
 - `pyserial` is installed with `python -m pip install pyserial`.
 - The ZU4EV board is connected through JTAG.
@@ -39,13 +40,13 @@ Prerequisites:
 Step 1, build the bitstream:
 
 ```powershell
-& "Z:\Softwares\Xilinx\Vivado\2024.2\bin\vivado.bat" -mode batch -source build_pl_ps_ddr_mem_test.tcl
+& "<VIVADO_INSTALL>\bin\vivado.bat" -mode batch -source build_pl_ps_ddr_mem_test.tcl
 ```
 
 Step 2, program the FPGA:
 
 ```powershell
-& "Z:\Softwares\Xilinx\Vivado\2024.2\bin\vivado.bat" -mode batch -source program_bitstream.tcl
+& "<VIVADO_INSTALL>\bin\vivado.bat" -mode batch -source program_bitstream.tcl
 ```
 
 Step 3, run a 4 KiB sanity test:
@@ -84,10 +85,8 @@ clk_hz = 200000000
 ## Hardware Summary
 
 - Board/SoC: ZU4EV, `xczu4ev-sfvc784-2-i`.
-- Vivado: `Z:\Softwares\Xilinx\Vivado\2024.2`.
+- Vivado: 2024.2. Replace `<VIVADO_INSTALL>` in command examples with your local Vivado installation directory.
 - DDR capacity: 4 GiB, implemented with four 8 Gb DDR devices.
-- PS/DDR reference project: `C:\Users\Administrator\Desktop\FPGA\XCZU4EV\XCZU4EV`.
-- PS/DDR reference BD: `C:\Users\Administrator\Desktop\FPGA\XCZU4EV\XCZU4EV\XCZU4EV.srcs\sources_1\bd\design_1\design_1.bd`.
 - PL clock: 200 MHz external single-ended oscillator on E12.
 - UART pins: `uart_rx=D12`, `uart_tx=C12`, `LVCMOS25`.
 - UART baud: 8,000,000 baud, 8N1.
@@ -97,6 +96,158 @@ clk_hz = 200000000
 - AXI burst byte count: 128 bytes.
 - Default test base address: `0x10000000`.
 - Default test size: 16 MiB.
+
+## Porting And Board Configuration
+
+This project is board-specific only in a few places. To migrate it to another
+ZU+ board or another Zynq UltraScale+ part, update the following items.
+
+### 1. Vivado Part Name
+
+Edit `build_pl_ps_ddr_mem_test.tcl`:
+
+```tcl
+set part_name "xczu4ev-sfvc784-2-i"
+```
+
+Change this to the exact device, package, and speed grade of the target board.
+The current design was validated on `xczu4ev-sfvc784-2-i`.
+
+### 2. PS And DDR Configuration Source
+
+The script imports PS/DDR settings from an existing reference block design:
+
+```tcl
+set ref_bd_file "<PATH_TO_REFERENCE_PS_BD>/design_1.bd"
+```
+
+For a different board, create or locate a known-good ZynqMP PS block design for
+that board, then point `ref_bd_file` to that `.bd` file. This reference design
+should already contain the correct DDR configuration, MIO settings, PS clocks,
+and fixed IO settings for the board.
+
+If no reference BD is available, create one in Vivado first using the board's
+schematic and memory parameters, verify that PS DDR boots correctly, and then
+use that BD as the configuration source.
+
+### 3. DDR Capacity And Safe Test Range
+
+Update the documentation and test defaults if the board DDR size differs from
+4 GiB.
+
+Edit `build_pl_ps_ddr_mem_test.tcl` if the default test range should change:
+
+```tcl
+set test_base_addr "0x0000000010000000"
+set test_bytes     "0x01000000"
+```
+
+The test overwrites DDR. On a Linux system, reserve the test range in the device
+tree, kernel command line, or application memory map. For large tests, verify
+that the selected range does not overlap the kernel, root filesystem, CMA,
+framebuffers, DMA buffers, or user applications.
+
+### 4. PL Clock Input
+
+The current board has a 200 MHz single-ended oscillator on E12. The design uses
+that clock as `sys_clk`.
+
+For another board, edit `constraints/uart_zu4ev.xdc`:
+
+```tcl
+create_clock -name sys_clk -period 5.000 [get_ports sys_clk]
+set_property PACKAGE_PIN E12 [get_ports sys_clk]
+set_property IOSTANDARD LVCMOS25 [get_ports sys_clk]
+```
+
+Change these fields as needed:
+
+```text
+clock period     -> match the target oscillator frequency
+PACKAGE_PIN      -> target board clock pin
+IOSTANDARD       -> target bank voltage and clock standard
+```
+
+Also update these defaults if the clock frequency changes:
+
+```text
+build_pl_ps_ddr_mem_test.tcl: pl_clk_mhz, pl_clk_hz
+rtl/config.vh: CFG_CLK_HZ
+host/pl_ps_ddr_test.py: --clk-hz default
+README/PROTOCOL documentation
+```
+
+### 5. UART Pins And Baud Rate
+
+The current UART pins match the referenced Mandelbrot project:
+
+```tcl
+set_property PACKAGE_PIN D12 [get_ports uart_rx]
+set_property IOSTANDARD LVCMOS25 [get_ports uart_rx]
+
+set_property PACKAGE_PIN C12 [get_ports uart_tx]
+set_property IOSTANDARD LVCMOS25 [get_ports uart_tx]
+```
+
+For another board, change the UART pins and IO standard in
+`constraints/uart_zu4ev.xdc`.
+
+If the baud rate changes, update:
+
+```text
+build_pl_ps_ddr_mem_test.tcl: uart_baud
+rtl/config.vh: CFG_UART_BAUD
+host/pl_ps_ddr_test.py: --baud default
+README/PROTOCOL documentation
+```
+
+The UART implementation uses a fractional accumulator, so the baud rate does
+not need to divide the FPGA clock exactly. The host and FPGA baud settings must
+still match.
+
+### 6. AXI Port Selection
+
+The script currently tries to connect the tester through SmartConnect to a PS
+slave AXI port, with `S_AXI_HP0_FPD` preferred:
+
+```tcl
+foreach ps_intf {S_AXI_HP0_FPD S_AXI_HPC0_FPD S_AXI_HP0} {
+    ...
+}
+```
+
+For another design, confirm that the selected PS AXI slave port is enabled in
+the PS configuration and that its data width is compatible with the tester. The
+current RTL uses a 64-bit AXI data width.
+
+If using a different PS AXI port, update the preferred interface list and clock
+pin list in `build_pl_ps_ddr_mem_test.tcl`.
+
+### 7. Host Defaults
+
+The host script can override all runtime test parameters from the command line.
+If the new board uses different defaults, update `host/pl_ps_ddr_test.py`:
+
+```text
+--port
+--baud
+--clk-hz
+--base
+--bytes
+--seed
+--flags
+```
+
+The safest migration flow is:
+
+```text
+1. Verify PS DDR initialization with a normal PS software flow.
+2. Build this project with the target part and reference PS BD.
+3. Program the bitstream.
+4. Run a 4 KiB test first.
+5. Run a 16 MiB test after 4 KiB passes.
+6. Run a larger test only after confirming the memory range is safe.
+```
 
 ## Top-Level Architecture
 
@@ -428,7 +579,7 @@ This makes speed reporting transparent and avoids FPGA divider logic.
 Run from this directory:
 
 ```powershell
-& "Z:\Softwares\Xilinx\Vivado\2024.2\bin\vivado.bat" -mode batch -source build_pl_ps_ddr_mem_test.tcl
+& "<VIVADO_INSTALL>\bin\vivado.bat" -mode batch -source build_pl_ps_ddr_mem_test.tcl
 ```
 
 The script performs these steps:
@@ -464,7 +615,7 @@ pl_ps_ddr_mem_test_proj/pl_ps_ddr_mem_test.runs/impl_1/system_wrapper.bit
 Program the bitstream through JTAG:
 
 ```powershell
-& "Z:\Softwares\Xilinx\Vivado\2024.2\bin\vivado.bat" -mode batch -source program_bitstream.tcl
+& "<VIVADO_INSTALL>\bin\vivado.bat" -mode batch -source program_bitstream.tcl
 ```
 
 Expected successful output includes:
