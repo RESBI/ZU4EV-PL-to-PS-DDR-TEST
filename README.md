@@ -18,6 +18,11 @@ through `S_AXI_HP0_FPD`.
 - 4 KiB write/read/verify: passing.
 - 16 MiB write/read/verify: passing.
 - 1 GiB write/read/verify: passing.
+- Direct PS DDR high-address access at `0x800000000`: passing.
+- Host-configurable logical-to-physical address translation: passing.
+- Address translation is enabled by default and can be queried with `--query-map`.
+- 64-bit `test_bytes` protocol: passing, including support for one-command 4 GiB size `0x100000000`.
+- Logical low/high boundary crossing at `0x7fff0000 .. 0x8000ffff`: passing.
 - Final measured throughput after the first write-path optimization:
   - Write: about `479 MiB/s`.
   - Read: about `455 MiB/s`.
@@ -50,6 +55,23 @@ Step 2, program the FPGA:
 ```
 
 Step 3, run a 4 KiB sanity test:
+
+First confirm the FPGA's active address translation settings:
+
+```powershell
+python .\host\pl_ps_ddr_test.py --port COM6 --query-map
+```
+
+Expected default mapping:
+
+```text
+map_flags           : 0x01
+addr_map_enabled    : True
+logical_split       : 0x0000000080000000
+physical_high_base  : 0x0000000800000000
+```
+
+Then run the test:
 
 ```powershell
 python .\host\pl_ps_ddr_test.py --port COM6 --base 0x10000000 --bytes 0x1000 --seed 0x13579bdf --flags 0x03 --timeout 10
@@ -86,7 +108,8 @@ clk_hz = 200000000
 
 - Board/SoC: ZU4EV, `xczu4ev-sfvc784-2-i`.
 - Vivado: 2024.2. Replace `<VIVADO_INSTALL>` in command examples with your local Vivado installation directory.
-- DDR capacity: 4 GiB, implemented with four 8 Gb DDR devices.
+- DDR capacity: 4 GiB, implemented with four Hynix `H5AN8G6NDJR-XNC` 8 Gb x16 DDR4 devices.
+- DDR configuration in this project: 8 Gb x16 devices, four components, 64-bit bus, conservative DDR4-2400P timing at 600 MHz DDR interface clock.
 - PL clock: 200 MHz external single-ended oscillator on E12.
 - UART pins: `uart_rx=D12`, `uart_tx=C12`, `LVCMOS25`.
 - UART baud: 8,000,000 baud, 8N1.
@@ -136,10 +159,50 @@ schematic and memory parameters, verify that PS DDR boots correctly, and then
 use that BD as the configuration source. Copy it into this repository before
 building so the project remains portable.
 
-### 3. DDR Capacity And Safe Test Range
+### 3. DDR Capacity, Device Geometry, And Safe Test Range
 
 Update the documentation and test defaults if the board DDR size differs from
 4 GiB.
+
+The tested board is populated with four Hynix `H5AN8G6NDJR-XNC` devices. Each
+device is an 8 Gb x16 DDR4 component. Four x16 components form a 64-bit data bus
+and provide:
+
+```text
+8 Gb/device * 4 devices = 32 Gb = 4 GiB
+```
+
+The reference BD originally carried timing and bus settings that were close to
+the board configuration, but its device capacity field was effectively a 4 Gb
+component configuration. That exposes only 2 GiB of DDR in Vivado's PS address
+map and prevents `HP0_DDR_HIGH` from being generated. The build script now
+keeps the conservative timing from the reference BD but explicitly corrects the
+device geometry to the populated 8 Gb x16 parts:
+
+```tcl
+CONFIG.PSU__DDRC__DEVICE_CAPACITY {8192 MBits}
+CONFIG.PSU__DDRC__DRAM_WIDTH {16 Bits}
+CONFIG.PSU__DDRC__ROW_ADDR_COUNT 16
+CONFIG.PSU_DDR_RAM_HIGHADDR 0xFFFFFFFF
+CONFIG.PSU__HIGH_ADDRESS__ENABLE 1
+CONFIG.PSU__DDR_HIGH_ADDRESS_GUI_ENABLE 1
+```
+
+Vivado 2024.2's ZynqMP PS IP does not include a named subpreset for
+`H5AN8G6NDJR-XNC`; the closest reliable approach is to configure the geometry
+and timing fields manually. The design intentionally does not force the memory
+to its 3200 MT/s maximum rating. It uses the reference design's conservative
+DDR4-2400P style timing and 600 MHz DDR interface setting because that was the
+known-good operating point for this board and PS initialization flow.
+
+After this correction, the generated PS address map contains both:
+
+```text
+HP0_DDR_LOW  offset 0x0000000000000000  range 0x0000000080000000
+HP0_DDR_HIGH offset 0x0000000800000000  range 0x0000000800000000
+```
+
+`HP0_DDR_HIGH` is required for PL access to the upper half of the 4 GiB DDR.
 
 Edit `build_pl_ps_ddr_mem_test.tcl` if the default test range should change:
 
@@ -284,9 +347,11 @@ The safest migration flow is:
 |  | pattern generator    |                                   |    |
 |  | AXI write engine     |                                   |    |
 |  | AXI read/check engine|                                   |    |
+|  | address translation  |  logical burst addr -> AXI addr  |    |
+|  | map_addr()           |  low direct / high DDR remap     |    |
 |  | result sender        |                                   |    |
 |  +----------+-----------+                                   |    |
-|             | M_AXI                                         |    |
+|             | M_AXI AWADDR/ARADDR after translation         |    |
 |             v                                               |    |
 |       +-----+------+                                        |    |
 |       | axi_smc_0  |  SmartConnect                          |    |
@@ -418,7 +483,7 @@ START frame from host:
 
 ```text
 TYPE = 0x01
-LEN  = 17
+LEN  = 21 or 38 with address mapping
 ```
 
 START payload:
@@ -426,10 +491,14 @@ START payload:
 ```text
 offset size field
 0      8    base_addr
-8      4    test_bytes
-12     4    pattern_seed
-16     1    flags
+8      8    test_bytes
+16     4    pattern_seed
+20     1    flags
 ```
+
+The mapped START payload adds `addr_map_flags`, `logical_split`, and
+`physical_high_base`; see `PROTOCOL.md` for the full byte layout. Older 32-bit
+size START payloads (`LEN = 17` and `LEN = 34`) are still accepted by the FPGA.
 
 ACK frame from FPGA:
 
@@ -442,7 +511,7 @@ RESULT frame from FPGA:
 
 ```text
 TYPE = 0x82
-LEN  = 58
+LEN  = 62
 ```
 
 RESULT payload:
@@ -451,15 +520,15 @@ RESULT payload:
 offset size field
 0      1    status
 1      8    base_addr
-9      4    test_bytes
-13     1    flags
-14     4    pattern_seed
-18     8    write_cycles
-26     8    read_cycles
-34     4    error_count
-38     4    first_mismatch_index
-42     8    first_mismatch_expected
-50     8    first_mismatch_actual
+9      8    test_bytes
+17     1    flags
+18     4    pattern_seed
+22     8    write_cycles
+30     8    read_cycles
+38     4    error_count
+42     4    first_mismatch_index
+46     8    first_mismatch_expected
+54     8    first_mismatch_actual
 ```
 
 ACK status values:
@@ -499,9 +568,213 @@ bytes:
 
 ```text
 base_addr[6:0] == 0
+test_bytes != 0
+test_bytes[6:0] == 0
+test_bytes <= 0x100000000
 ```
 
 If these requirements are not met, the FPGA returns `BAD_ALIGN` or `BAD_SIZE`.
+
+## Host-Configurable Address Translation
+
+ZynqMP DDR is not always exposed as one continuous low 32-bit address range.
+On this board, the low DDR window is visible at:
+
+```text
+DDR_LOW: 0x00000000 .. 0x7fffffff
+```
+
+The high DDR window is mapped in 64-bit address space, with the useful high
+window starting at:
+
+```text
+DDR_HIGH base: 0x0000000800000000
+```
+
+Without address translation, a test range such as:
+
+```text
+base  = 0x10000000
+bytes = 0x80000000
+```
+
+tries to access:
+
+```text
+0x10000000 .. 0x8fffffff
+```
+
+The portion above `0x7fffffff` is not in the low DDR window, so the PS AXI port
+can return response errors.
+
+The build must expose `HP0_DDR_HIGH` in the PS address map. This project opens it
+by correcting the DDR geometry to the actual 8 Gb x16 devices and enabling the
+PS high-address parameters. The build script intentionally fails if the generated
+BD does not assign a `DDR_HIGH` segment to `ddr_tester_0/M_AXI`; this avoids
+silently masking a wrong PS configuration.
+
+### Translation Architecture
+
+The translation layer is inside `rtl/pl_ps_ddr_mem_test_top.v`. It is a PL-side
+logical-to-physical address mapper placed directly before the AXI AW/AR address
+outputs:
+
+```text
+Host Python script
+    |
+    | UART START, TYPE=0x01, LEN=38 by default
+    v
+command_parser
+    |
+    | base_addr, test_bytes, seed, flags
+    | addr_map_flags, logical_split, physical_high_base
+    v
+active command/config registers
+    |
+    | active_base
+    | active_map_flags
+    | active_logical_split
+    | active_physical_high_base
+    v
+map_addr(logical_burst_addr)
+    |
+    | translated 64-bit AXI address
+    v
+M_AXI AWADDR / ARADDR
+    |
+    v
+SmartConnect -> PS S_AXI_HP0_FPD -> PS DDR controller
+```
+
+The mapper is not a PS address-map rewrite. It does not change the ZynqMP
+configuration at runtime. It only changes the 64-bit AXI address that the PL
+master presents for each DDR test burst.
+
+The active FPGA-side registers are:
+
+```text
+active_map_flags
+active_logical_split
+active_physical_high_base
+```
+
+They are initialized after reset to:
+
+```text
+active_map_flags          = 0x01
+active_logical_split      = 0x0000000080000000
+active_physical_high_base = 0x0000000800000000
+```
+
+They are updated whenever a valid START command is accepted. Rejected commands do
+not update the active mapping.
+
+The extended START command lets the host configure a two-segment logical to
+physical address translation layer in the FPGA:
+
+```text
+if logical_addr < logical_split:
+    axi_addr = logical_addr
+else:
+    axi_addr = physical_high_base + (logical_addr - logical_split)
+```
+
+Default host mapping values:
+
+```text
+logical_split      = 0x0000000080000000
+physical_high_base = 0x0000000800000000
+```
+
+With this mapping enabled, a logical range can cross the 2 GiB boundary. For
+example:
+
+```text
+logical 0x7fffff80 -> physical 0x000000007fffff80
+logical 0x80000000 -> physical 0x0000000800000000
+logical 0x80000080 -> physical 0x0000000800000080
+```
+
+The default logical 4 GiB view is therefore:
+
+```text
+logical 0x00000000 .. 0x7fffffff -> physical 0x0000000000000000 .. 0x000000007fffffff
+logical 0x80000000 .. 0xffffffff -> physical 0x0000000800000000 .. 0x000000087fffffff
+```
+
+Address generation is burst based. The tester uses 16 beats per AXI burst, 8
+bytes per beat, so every burst is 128 bytes:
+
+```text
+BURST_BEATS = 16
+BURST_BYTES = 128
+```
+
+For burst `N`:
+
+```text
+logical_burst_addr = active_base + (N * 128)
+axi_burst_addr     = map_addr(logical_burst_addr)
+```
+
+The same `map_addr()` function is used for write AW addresses, standalone read
+AR addresses, and readback AR addresses after a write phase. This guarantees
+that write-then-read verification checks the same physical DDR range that was
+written.
+
+The current host enables this mapping by default. Use `--no-addr-map` only when
+intentionally testing the low DDR window without translation.
+
+Query the FPGA's currently active translation configuration:
+
+```powershell
+python .\host\pl_ps_ddr_test.py --port COM6 --query-map
+```
+
+Expected default configuration after reset or after a normal host command:
+
+```text
+map_flags           : 0x01
+addr_map_enabled    : True
+logical_split       : 0x0000000080000000
+physical_high_base  : 0x0000000800000000
+```
+
+For the full design notes, see `ADDRESS_TRANSLATION_REPORT.md`.
+
+Important limitations:
+
+- The current host sends 64-bit `test_bytes`, so one command can represent
+  exactly 4 GiB as `0x100000000`.
+- The RTL currently accepts sizes up to `0x100000000`, matching this board's
+  4 GiB DDR capacity.
+- Do not test ranges used by PS/Linux/firmware.
+- A burst must not cross a translation split unless the split is aligned to the
+  128-byte burst size. The default split `0x80000000` is 128-byte aligned.
+
+Full 4 GiB logical coverage in one command, if PS is not using DDR:
+
+```powershell
+python .\host\pl_ps_ddr_test.py --port COM6 --base 0x00000000 --bytes 0x100000000 --seed 0x13579bdf --flags 0x03 --timeout 1200
+```
+
+Example crossing the low/high DDR boundary:
+
+```powershell
+python .\host\pl_ps_ddr_test.py --port COM6 --base 0x7fff0000 --bytes 0x00020000 --seed 0x13579bdf --flags 0x03 --timeout 20
+```
+
+Example mapping a logical high address to physical DDR high:
+
+```powershell
+python .\host\pl_ps_ddr_test.py --port COM6 --base 0x80000000 --bytes 0x01000000 --seed 0x13579bdf --flags 0x03 --timeout 60
+```
+
+Direct physical high-address sanity test:
+
+```powershell
+python .\host\pl_ps_ddr_test.py --port COM6 --no-addr-map --base 0x800000000 --bytes 0x1000 --seed 0x13579bdf --flags 0x03 --timeout 10
+```
 
 ## DDR Safety Notes
 
@@ -604,11 +877,17 @@ The script performs these steps:
 11. Connect tester M_AXI through SmartConnect to PS S_AXI_HP0_FPD.
 12. Export UART, DDR, and FIXED_IO ports.
 13. Validate and save block design.
-14. Generate HDL wrapper.
-15. Run synthesis.
-16. Run implementation.
-17. Write bitstream.
+14. Confirm `ddr_tester_0/M_AXI` has `HP0_DDR_HIGH` assigned.
+15. Generate HDL wrapper.
+16. Run synthesis.
+17. Run implementation.
+18. Write bitstream.
 ```
+
+The build sets `synth_checkpoint_mode None` for the block design. This avoids a
+Vivado 2024.2 SmartConnect out-of-context synthesis issue observed after adding
+the high DDR segment, where the OOC run failed while opening a temporary
+`.Xil/.../elab.rtd` file even though the design had no RTL or parameter errors.
 
 Generated bitstream:
 
@@ -656,6 +935,14 @@ Useful options:
 --bytes      test byte count
 --seed       pattern seed
 --flags      test mode
+--addr-map   kept for compatibility; address translation is enabled by default
+--no-addr-map
+             send a no-map START and disable address translation for this command
+--query-map  query the active FPGA address translation configuration
+--logical-split
+             logical split address for the high DDR window, default 0x80000000
+--physical-high-base
+             physical AXI base for logical addresses above the split, default 0x800000000
 --timeout    UART frame timeout in seconds
 --no-flush   do not flush UART buffers before sending command
 ```
@@ -700,6 +987,18 @@ Read-only speed test without compare:
 python .\host\pl_ps_ddr_test.py --port COM6 --base 0x10000000 --bytes 0x01000000 --seed 0x13579bdf --flags 0x02 --timeout 60
 ```
 
+Address-translation boundary test:
+
+```powershell
+python .\host\pl_ps_ddr_test.py --port COM6 --base 0x7fff0000 --bytes 0x00020000 --seed 0x13579bdf --flags 0x03 --timeout 20
+```
+
+Logical high-DDR test mapped to physical `0x800000000`:
+
+```powershell
+python .\host\pl_ps_ddr_test.py --port COM6 --base 0x80000000 --bytes 0x01000000 --seed 0x13579bdf --flags 0x03 --timeout 60
+```
+
 ## Final Measured Results
 
 All final tests used:
@@ -729,15 +1028,82 @@ result       : PASS
 16 MiB final result:
 
 ```text
-write_cycles : 6679333
-read_cycles  : 7039396
-write_time_s : 0.033396665
-read_time_s  : 0.035196980
-write_mibps  : 479.090
-read_mibps   : 454.584
+write_cycles : 6679343
+read_cycles  : 7039416
+write_time_s : 0.033396715
+read_time_s  : 0.035197080
+write_mibps  : 479.089
+read_mibps   : 454.583
 error_count  : 0
 result       : PASS
 ```
+
+Direct physical high DDR, 4 KiB at `0x800000000`:
+
+```text
+write_cycles : 1630
+read_cycles  : 1736
+write_time_s : 0.000008150
+read_time_s  : 0.000008680
+write_mibps  : 479.294
+read_mibps   : 450.029
+error_count  : 0
+result       : PASS
+```
+
+Logical high DDR through address translation, 4 KiB logical `0x80000000` mapped
+to physical `0x800000000`:
+
+```text
+write_cycles : 1631
+read_cycles  : 1694
+write_time_s : 0.000008155
+read_time_s  : 0.000008470
+write_mibps  : 479.001
+read_mibps   : 461.187
+error_count  : 0
+result       : PASS
+```
+
+Boundary-crossing address translation, 128 KiB at logical `0x7fff0000`:
+
+```text
+write_cycles : 52183
+read_cycles  : 55010
+write_time_s : 0.000260915
+read_time_s  : 0.000275050
+write_mibps  : 479.083
+read_mibps   : 454.463
+error_count  : 0
+result       : PASS
+```
+
+Logical high DDR through address translation, 16 MiB at logical `0x80000000`:
+
+```text
+write_cycles : 6679342
+read_cycles  : 7039432
+write_time_s : 0.033396710
+read_time_s  : 0.035197160
+write_mibps  : 479.089
+read_mibps   : 454.582
+error_count  : 0
+result       : PASS
+```
+
+Address translation performance comparison, 16 MiB:
+
+```text
+Mode                         Write MiB/s  Read MiB/s  Result
+---------------------------  -----------  ----------  ------
+No mapping, low DDR          479.089      454.583     PASS
+Self-map, low DDR            479.089      454.582     PASS
+Default map, high DDR        479.089      454.582     PASS
+```
+
+Within measurement resolution, the host-configurable address translation layer
+does not reduce throughput. The extra compare/add logic is outside the AXI data
+beat path and only affects the burst start address generation.
 
 1 GiB final result:
 
@@ -995,6 +1361,8 @@ ACK is `BAD_ALIGN`:
 ACK is `BAD_SIZE`:
 
 - Use a non-zero test size that is a multiple of 128 bytes.
+- Use `0x100000000` for exactly 4 GiB; do not use `0xffffffff`, which is not 128-byte aligned.
+- Keep `--bytes` less than or equal to `0x100000000` for this 4 GiB design.
 
 RESULT is `TEST_FAILED`:
 
@@ -1026,6 +1394,8 @@ Unexpected low speed:
 - The write path is improved but AW/W/B channels are not deeply decoupled.
 - The selected DDR range is overwritten by the test.
 - PS DDR must be initialized before the PL test can work.
+- Address translation currently supports one split and two segments: direct low DDR plus remapped high DDR.
+- Direct physical high-address tests require `--no-addr-map` because address translation is enabled by default.
 
 ## Next Optimization Directions
 
@@ -1070,6 +1440,9 @@ host/pl_ps_ddr_test.py
 
 PROTOCOL.md
     Binary UART protocol reference.
+
+ADDRESS_TRANSLATION_REPORT.md
+    Detailed architecture and design report for the PL-side address translation layer.
 
 REPORT.md
     Engineering report summarizing design evolution and measurements.

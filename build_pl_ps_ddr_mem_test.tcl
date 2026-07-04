@@ -27,7 +27,7 @@ proc apply_ps_config_from_bd {cell bd_file} {
     set bd_text [read $fd]
     close $fd
 
-    set applied 0
+    set ps_props [list]
     set matches [regexp -all -inline {"([A-Za-z0-9_]+)"[ \t\r\n]*:[ \t\r\n]*\{[ \t\r\n]*"value"[ \t\r\n]*:[ \t\r\n]*"([^"]*)"[ \t\r\n]*\}} $bd_text]
     foreach {full key value} $matches {
         if {[regexp {ACT_FREQ|HIGHADDR|LOWADDR|FREQMHZ$} $key]} {
@@ -35,15 +35,88 @@ proc apply_ps_config_from_bd {cell bd_file} {
         }
         set prop CONFIG.$key
         if {[lsearch -exact [list_property $cell] $prop] >= 0} {
-            if {[catch {set_property $prop $value $cell} err]} {
-                puts "WARNING: Skipped PS property $prop=$value: $err"
-            } else {
-                incr applied
-            }
+            lappend ps_props $prop $value
         }
     }
 
-    puts "Applied $applied PS properties from reference BD: $bd_file"
+    if {[llength $ps_props]} {
+        if {[catch {set_property -dict $ps_props $cell} err]} {
+            puts "ERROR: Failed to apply PS properties from reference BD as a single customization dict: $err"
+            exit 1
+        }
+    }
+
+    puts "Applied [expr {[llength $ps_props] / 2}] PS properties from reference BD: $bd_file"
+}
+
+proc enable_ps_ddr_high_address {cell} {
+    set high_addr_props [list]
+    foreach {prop value} {
+        CONFIG.PSU__DDRC__DEVICE_CAPACITY {8192 MBits}
+        CONFIG.PSU__DDRC__DRAM_WIDTH {16 Bits}
+        CONFIG.PSU__DDRC__ROW_ADDR_COUNT 16
+        CONFIG.PSU_DDR_RAM_HIGHADDR 0xFFFFFFFF
+        CONFIG.PSU_DDR_RAM_LOWADDR_OFFSET 0x80000000
+        CONFIG.PSU_DDR_RAM_HIGHADDR_OFFSET 0x800000000
+        CONFIG.PSU__HIGH_ADDRESS__ENABLE 1
+        CONFIG.PSU__DDR_HIGH_ADDRESS_GUI_ENABLE 1
+    } {
+        if {[lsearch -exact [list_property $cell] $prop] >= 0} {
+            lappend high_addr_props $prop $value
+        }
+    }
+    if {[llength $high_addr_props]} {
+        set_property -dict $high_addr_props $cell
+    }
+
+    set prop CONFIG.PSU__PROTECTION__SLAVES
+    if {[lsearch -exact [list_property $cell] $prop] < 0} {
+        puts "ERROR: PS property $prop was not found; cannot enable DDR_HIGH."
+        exit 1
+    }
+
+    set slaves [get_property $prop $cell]
+    set high_pattern {DDR;DDR_HIGH;800000000;[0-9A-Fa-f]+;[01]}
+
+    if {![regexp $high_pattern $slaves high_token]} {
+        puts "ERROR: DDR_HIGH protection slave entry was not found in $prop."
+        puts "Current $prop = $slaves"
+        exit 1
+    }
+
+    regsub {;[01]$} $high_token {;1} enabled_token
+    if {$high_token eq $enabled_token} {
+        puts "DDR_HIGH protection slave is already enabled: $enabled_token"
+    } else {
+        regsub $high_pattern $slaves $enabled_token slaves
+        if {[catch {set_property $prop $slaves $cell} err]} {
+            puts "ERROR: Failed to enable DDR_HIGH in $prop: $err"
+            exit 1
+        }
+    }
+
+    set verify [get_property $prop $cell]
+    if {[string first $enabled_token $verify] < 0} {
+        puts "ERROR: DDR_HIGH protection slave did not stay enabled after setting $prop."
+        puts "Current $prop = $verify"
+        exit 1
+    }
+    puts "Enabled DDR_HIGH protection slave: $enabled_token"
+
+    foreach prop {
+        CONFIG.PSU_DDR_RAM_HIGHADDR
+        CONFIG.PSU_DDR_RAM_LOWADDR_OFFSET
+        CONFIG.PSU_DDR_RAM_HIGHADDR_OFFSET
+        CONFIG.PSU__DDRC__DEVICE_CAPACITY
+        CONFIG.PSU__DDRC__DRAM_WIDTH
+        CONFIG.PSU__DDRC__ROW_ADDR_COUNT
+        CONFIG.PSU__HIGH_ADDRESS__ENABLE
+        CONFIG.PSU__DDR_HIGH_ADDRESS_GUI_ENABLE
+    } {
+        if {[lsearch -exact [list_property $cell] $prop] >= 0} {
+            puts "  $prop = [get_property $prop $cell]"
+        }
+    }
 }
 
 proc connect_bd_pin_if_exists {src dst} {
@@ -90,6 +163,7 @@ create_bd_cell -type ip -vlnv xilinx.com:ip:zynq_ultra_ps_e:* zynq_ultra_ps_e_0
 set ps [get_bd_cells zynq_ultra_ps_e_0]
 
 apply_ps_config_from_bd $ps $ref_bd_file
+enable_ps_ddr_high_address $ps
 set_ps_property_if_exists $ps CONFIG.PSU__FPGA_PL0_ENABLE 1
 set_ps_property_if_exists $ps CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ $pl_clk_mhz
 set_ps_property_if_exists $ps CONFIG.PSU__USE__FABRIC__RST 1
@@ -155,9 +229,27 @@ if {[llength [get_bd_intf_pins -quiet zynq_ultra_ps_e_0/FIXED_IO]]} {
     make_bd_intf_pins_external [get_bd_intf_pins zynq_ultra_ps_e_0/FIXED_IO]
 }
 
+validate_bd_design
 assign_bd_address
+puts "Visible PS SAXIGP2 address segments:"
+foreach seg [get_bd_addr_segs -quiet zynq_ultra_ps_e_0/SAXIGP2/*] {
+    puts "  $seg offset=[get_property OFFSET $seg] range=[get_property RANGE $seg]"
+}
+puts "Assigned address segments for ddr_tester_0:"
+set has_ddr_high 0
+foreach seg [get_bd_addr_segs -quiet -of_objects [get_bd_addr_spaces ddr_tester_0/M_AXI]] {
+    puts "  $seg offset=[get_property OFFSET $seg] range=[get_property RANGE $seg]"
+    if {[string first "DDR_HIGH" $seg] >= 0} {
+        set has_ddr_high 1
+    }
+}
+if {$has_ddr_high == 0} {
+    puts "ERROR: DDR_HIGH was not assigned to ddr_tester_0/M_AXI. PS high address exposure is still not open."
+    exit 1
+}
 validate_bd_design
 save_bd_design
+set_property synth_checkpoint_mode None [get_files $proj_dir/$proj_name.srcs/sources_1/bd/system/system.bd]
 
 make_wrapper -files [get_files $proj_dir/$proj_name.srcs/sources_1/bd/system/system.bd] -top
 add_files -norecurse $proj_dir/$proj_name.gen/sources_1/bd/system/hdl/system_wrapper.v

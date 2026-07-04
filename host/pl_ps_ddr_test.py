@@ -12,8 +12,10 @@ except ImportError:
 
 SYNC = b"\x55\xAA"
 TYPE_START = 0x01
+TYPE_QUERY_CONFIG = 0x02
 TYPE_ACK = 0x81
 TYPE_RESULT = 0x82
+TYPE_MAP_CONFIG = 0x83
 
 STATUS = {
     0x00: "OK",
@@ -23,6 +25,8 @@ STATUS = {
     0x7F: "BAD_FRAME",
     0x80: "TEST_FAILED",
 }
+
+ADDR_MAP_ENABLE = 0x01
 
 
 def parse_int(text):
@@ -74,15 +78,24 @@ def read_frame(port, timeout_s):
 
 
 def decode_result(payload, clk_hz):
-    if len(payload) != 58:
+    if len(payload) not in (58, 62):
         raise ValueError(f"unexpected RESULT length {len(payload)}")
     status = payload[0]
-    base, size = struct.unpack_from("<QI", payload, 1)
-    flags = payload[13]
-    seed = struct.unpack_from("<I", payload, 14)[0]
-    wr_cycles, rd_cycles = struct.unpack_from("<QQ", payload, 18)
-    errors, first_index = struct.unpack_from("<II", payload, 34)
-    first_expected, first_actual = struct.unpack_from("<QQ", payload, 42)
+    if len(payload) == 62:
+        base, size = struct.unpack_from("<QQ", payload, 1)
+        flags = payload[17]
+        seed = struct.unpack_from("<I", payload, 18)[0]
+        wr_cycles, rd_cycles = struct.unpack_from("<QQ", payload, 22)
+        errors, first_index = struct.unpack_from("<II", payload, 38)
+        first_expected, first_actual = struct.unpack_from("<QQ", payload, 46)
+    else:
+        base, size32 = struct.unpack_from("<QI", payload, 1)
+        size = size32
+        flags = payload[13]
+        seed = struct.unpack_from("<I", payload, 14)[0]
+        wr_cycles, rd_cycles = struct.unpack_from("<QQ", payload, 18)
+        errors, first_index = struct.unpack_from("<II", payload, 34)
+        first_expected, first_actual = struct.unpack_from("<QQ", payload, 42)
     wr_seconds = wr_cycles / clk_hz if clk_hz and wr_cycles else 0.0
     rd_seconds = rd_cycles / clk_hz if clk_hz and rd_cycles else 0.0
     mib = size / (1024 * 1024)
@@ -109,11 +122,26 @@ def decode_result(payload, clk_hz):
     }
 
 
+def decode_map_config(payload):
+    if len(payload) != 18:
+        raise ValueError(f"unexpected MAP_CONFIG length {len(payload)}")
+    busy = payload[0]
+    map_flags = payload[1]
+    logical_split, physical_high_base = struct.unpack_from("<QQ", payload, 2)
+    return {
+        "busy": busy,
+        "map_flags": map_flags,
+        "addr_map_enabled": (map_flags & ADDR_MAP_ENABLE) != 0,
+        "logical_split": logical_split,
+        "physical_high_base": physical_high_base,
+    }
+
+
 def print_result(result):
     print("PL-PS DDR TEST RESULT")
     print(f"status       : {result['status_name']} (0x{result['status']:02X})")
     print(f"base_addr    : 0x{result['base_addr']:016X}")
-    print(f"test_bytes   : 0x{result['test_bytes']:08X} ({result['test_bytes']} bytes)")
+    print(f"test_bytes   : 0x{result['test_bytes']:016X} ({result['test_bytes']} bytes)")
     print(f"flags        : 0x{result['flags']:02X}")
     print(f"seed         : 0x{result['seed']:08X}")
     print(f"write_cycles : {result['write_cycles']}")
@@ -130,6 +158,15 @@ def print_result(result):
     print(f"result       : {'PASS' if result['pass'] else 'FAIL'}")
 
 
+def print_map_config(config):
+    print("PL ADDRESS TRANSLATION CONFIG")
+    print(f"busy                : {config['busy']}")
+    print(f"map_flags           : 0x{config['map_flags']:02X}")
+    print(f"addr_map_enabled    : {config['addr_map_enabled']}")
+    print(f"logical_split       : 0x{config['logical_split']:016X}")
+    print(f"physical_high_base  : 0x{config['physical_high_base']:016X}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Host script for PL-to-PS DDR UART test")
     parser.add_argument("--port", default="COM6")
@@ -139,6 +176,11 @@ def main():
     parser.add_argument("--bytes", dest="test_bytes", type=parse_int, default=0x01000000)
     parser.add_argument("--seed", type=parse_int, default=0x13579BDF)
     parser.add_argument("--flags", type=parse_int, default=0x03, help="0x01 write, 0x02 read/verify, 0x03 both")
+    parser.add_argument("--addr-map", action="store_true", help="enable logical-to-physical DDR address translation; this is now the default")
+    parser.add_argument("--no-addr-map", action="store_true", help="send a no-map START frame and disable address translation for this command")
+    parser.add_argument("--logical-split", type=parse_int, default=0x80000000, help="logical address where high DDR mapping starts")
+    parser.add_argument("--physical-high-base", type=parse_int, default=0x800000000, help="physical AXI base for logical addresses above the split")
+    parser.add_argument("--query-map", action="store_true", help="query the FPGA's currently active address translation configuration")
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--no-flush", action="store_true")
     args = parser.parse_args()
@@ -147,8 +189,28 @@ def main():
         print("pyserial is required: python -m pip install pyserial", file=sys.stderr)
         return 2
 
-    payload = struct.pack("<QII B", args.base, args.test_bytes, args.seed, args.flags & 0xFF)
-    frame = make_frame(TYPE_START, payload)
+    if args.test_bytes < 0 or args.test_bytes > 0x100000000:
+        print("error: --bytes must be in range 0..0x100000000", file=sys.stderr)
+        return 2
+
+    if args.query_map:
+        frame = make_frame(TYPE_QUERY_CONFIG, b"")
+    elif not args.no_addr_map:
+        map_flags = ADDR_MAP_ENABLE
+        payload = struct.pack(
+            "<QQIBBQQ",
+            args.base,
+            args.test_bytes,
+            args.seed,
+            args.flags & 0xFF,
+            map_flags,
+            args.logical_split,
+            args.physical_high_base,
+        )
+        frame = make_frame(TYPE_START, payload)
+    else:
+        payload = struct.pack("<QQI B", args.base, args.test_bytes, args.seed, args.flags & 0xFF)
+        frame = make_frame(TYPE_START, payload)
 
     with serial.Serial(args.port, args.baud, timeout=0.05) as port:
         if not args.no_flush:
@@ -156,6 +218,14 @@ def main():
             port.reset_output_buffer()
         port.write(frame)
         port.flush()
+
+        if args.query_map:
+            while True:
+                frame_type, payload = read_frame(port, args.timeout)
+                if frame_type == TYPE_MAP_CONFIG:
+                    print_map_config(decode_map_config(payload))
+                    return 0
+                print(f"Ignoring frame type 0x{frame_type:02X}")
 
         frame_type, ack_payload = read_frame(port, args.timeout)
         if frame_type != TYPE_ACK or len(ack_payload) != 1:

@@ -100,17 +100,19 @@ Checksum rule:
 Host-to-FPGA command:
 
 - `TYPE = 0x01`
-- `LEN = 17`
+- `LEN = 21`, or `LEN = 38` with address translation
 
 Payload layout:
 
 ```text
 offset size field
 0      8    base_addr
-8      4    test_bytes
-12     4    pattern_seed
-16     1    flags
+8      8    test_bytes
+16     4    pattern_seed
+20     1    flags
 ```
+
+Older 32-bit-size command payloads are still accepted for compatibility.
 
 FPGA-to-host ACK:
 
@@ -120,7 +122,7 @@ FPGA-to-host ACK:
 FPGA-to-host RESULT:
 
 - `TYPE = 0x82`
-- `LEN = 58`
+- `LEN = 62`
 
 Final RESULT layout:
 
@@ -128,15 +130,15 @@ Final RESULT layout:
 offset size field
 0      1    status
 1      8    base_addr
-9      4    test_bytes
-13     1    flags
-14     4    pattern_seed
-18     8    write_cycles
-26     8    read_cycles
-34     4    error_count
-38     4    first_mismatch_index
-42     8    first_mismatch_expected
-50     8    first_mismatch_actual
+9      8    test_bytes
+17     1    flags
+18     4    pattern_seed
+22     8    write_cycles
+30     8    read_cycles
+38     4    error_count
+42     4    first_mismatch_index
+46     8    first_mismatch_expected
+54     8    first_mismatch_actual
 ```
 
 The FPGA returns raw cycle counts only. The host computes elapsed time and
