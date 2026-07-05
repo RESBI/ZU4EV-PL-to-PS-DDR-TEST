@@ -452,7 +452,7 @@ flowchart TD
 The AXI write data path is:
 
 ```mermaid
-flowchart LR
+flowchart TB
     Pattern[Lane-safe pattern generator] --> WData[AXI WDATA]
     Active[Active base/map registers] --> Addr[map_addr logical burst address to AWADDR]
     Addr --> Master[ddr_tester_0 M_AXI write address channel]
@@ -466,7 +466,7 @@ flowchart LR
 The AXI read/check path is:
 
 ```mermaid
-flowchart LR
+flowchart TB
     Active[Active base/map registers] --> Addr[map_addr logical burst address to ARADDR]
     Addr --> Master[ddr_tester_0 M_AXI read address channel]
     Master --> Smc[axi_smc_0 SmartConnect]
