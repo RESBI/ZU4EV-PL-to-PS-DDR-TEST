@@ -369,8 +369,6 @@ flowchart TB
 
     Usb <-->|uart_rx / uart_tx| Uart
 
-    Smc -->|M00_AXI| HpPort
-
     subgraph PS["ZynqMP PS"]
         direction LR
         HpPort["S_AXI_HP0_FPD<br/>64-bit slave port"]
@@ -379,8 +377,10 @@ flowchart TB
         DdrCtrl --> Ddr["4 GiB DDR4"]
     end
 
-    classDef fabric fill:#e8f1ff,stroke:#3b82f6,stroke-width:1px,color:#0f172a
-    classDef tester fill:#bfdbfe,stroke:#1d4ed8,stroke-width:2px,color:#0f172a
+    Smc -->|M00_AXI| HpPort
+
+    classDef fabric fill:#fdf2f8,stroke:#ec4899,stroke-width:1px,color:#0f172a
+    classDef tester fill:#fbcfe8,stroke:#be185d,stroke-width:2px,color:#0f172a
     classDef clock fill:#fef3c7,stroke:#d97706,stroke-width:1px,color:#0f172a
     class PL fabric
     class Tester tester
