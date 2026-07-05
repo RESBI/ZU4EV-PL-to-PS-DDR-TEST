@@ -55,30 +55,31 @@ Main blocks:
 
 Final clocking:
 
-```text
-E12 external 200 MHz oscillator
-    -> sys_clk
-    -> ddr_tester_0/aclk
-    -> axi_smc_0/aclk
-    -> zynq_ultra_ps_e_0/saxihp0_fpd_aclk
+```mermaid
+flowchart LR
+    Osc[E12 external 200 MHz oscillator] --> SysClk[sys_clk]
+    SysClk --> TesterClk[ddr_tester_0/aclk]
+    SysClk --> SmcClk[axi_smc_0/aclk]
+    SysClk --> HpClk[zynq_ultra_ps_e_0/saxihp0_fpd_aclk]
 ```
 
 Reset source:
 
-```text
-zynq_ultra_ps_e_0/pl_resetn0
-    -> ddr_tester_0/aresetn
-    -> axi_smc_0/aresetn
+```mermaid
+flowchart LR
+    Reset[zynq_ultra_ps_e_0/pl_resetn0] --> TesterReset[ddr_tester_0/aresetn]
+    Reset --> SmcReset[axi_smc_0/aresetn]
 ```
 
 AXI data path:
 
-```text
-ddr_tester_0/M_AXI
-    -> axi_smc_0/S00_AXI
-    -> axi_smc_0/M00_AXI
-    -> zynq_ultra_ps_e_0/S_AXI_HP0_FPD
-    -> PS DDR controller
+```mermaid
+flowchart LR
+    Tester[ddr_tester_0/M_AXI] --> S00[axi_smc_0/S00_AXI]
+    S00 --> M00[axi_smc_0/M00_AXI]
+    M00 --> Hp[ZynqMP PS S_AXI_HP0_FPD]
+    Hp --> Ctrl[PS DDR controller]
+    Ctrl --> Ddr[DDR]
 ```
 
 ## 4. UART Protocol
@@ -246,8 +247,10 @@ trigger Vivado IP parameter errors.
 
 The AXI path was changed to use SmartConnect and PS `S_AXI_HP0_FPD`:
 
-```text
-ddr_tester_0/M_AXI -> axi_smc_0 -> zynq_ultra_ps_e_0/S_AXI_HP0_FPD
+```mermaid
+flowchart LR
+    Tester[ddr_tester_0/M_AXI] --> Smc[axi_smc_0 SmartConnect]
+    Smc --> Hp[zynq_ultra_ps_e_0/S_AXI_HP0_FPD]
 ```
 
 This provided a cleaner and more standard AXI connection than direct wiring.

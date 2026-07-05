@@ -129,23 +129,19 @@ The address translation layer is inside `rtl/pl_ps_ddr_mem_test_top.v`.
 It sits between the command/configuration registers and the AXI AW/AR address
 generation logic:
 
-```text
-Host UART command
-    |
-    v
-command_parser
-    |
-    v
-active_* configuration registers
-    |
-    v
-map_addr(logical_addr, map_flags, logical_split, physical_high_base)
-    |
-    v
-AXI AWADDR / ARADDR
-    |
-    v
-SmartConnect -> PS S_AXI_HP0_FPD -> DDR controller
+```mermaid
+flowchart TD
+    Host[Host UART command] --> Parser[command_parser]
+    Parser --> Active[active configuration registers]
+    Active --> Write[AXI write engine]
+    Active --> Read[AXI read/check engine]
+    Write --> Map[map_addr logical address mapper]
+    Read --> Map
+    Map --> Addr[AXI AWADDR / ARADDR]
+    Addr --> Smc[SmartConnect]
+    Smc --> Hp[PS S_AXI_HP0_FPD]
+    Hp --> DdrCtrl[PS DDR controller]
+    DdrCtrl --> Ddr[DDR]
 ```
 
 The translation is applied only to AXI address-channel addresses. It does not
@@ -445,12 +441,15 @@ axi_burst_addr = map_addr(logical_burst_addr,
 
 The same mapping function is used for:
 
-```text
-write AWADDR for the first write burst
-write AWADDR for every later write burst
-read ARADDR for the first read burst
-read ARADDR for every later read burst
-readback ARADDR after a write phase
+```mermaid
+flowchart TD
+    Active[active_base and active map registers] --> Logical[logical burst address]
+    Logical --> Map[map_addr]
+    Map --> WriteFirst[first write AWADDR]
+    Map --> WriteNext[later write AWADDRs]
+    Map --> ReadFirst[first standalone read ARADDR]
+    Map --> ReadNext[later standalone read ARADDRs]
+    Map --> Readback[readback ARADDR after write phase]
 ```
 
 This is important. If write used translated addresses but readback used raw
@@ -620,10 +619,15 @@ AXI beats the same value. This avoids false failures on paths that duplicate
 
 For a write-then-read command:
 
-```text
-write phase uses translated AWADDR
-readback phase uses translated ARADDR
-compare expects the same beat-index pattern
+```mermaid
+flowchart LR
+    Cmd[write-then-read command] --> W[Write phase]
+    W --> AW[Translated AWADDR]
+    AW --> DDR[(DDR physical range)]
+    DDR --> AR[Translated readback ARADDR]
+    AR --> R[Readback phase]
+    Pattern[Same beat-index lane-safe pattern] --> Compare[Compare]
+    R --> Compare
 ```
 
 Therefore, if address translation is correct and DDR returns the written data,

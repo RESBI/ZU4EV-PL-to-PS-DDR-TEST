@@ -309,64 +309,82 @@ If the new board uses different defaults, update `host/pl_ps_ddr_test.py`:
 
 The safest migration flow is:
 
-```text
-1. Verify PS DDR initialization with a normal PS software flow.
-2. Build this project with the target part and reference PS BD.
-3. Program the bitstream.
-4. Run a 4 KiB test first.
-5. Run a 16 MiB test after 4 KiB passes.
-6. Run a larger test only after confirming the memory range is safe.
+```mermaid
+flowchart TD
+    A[Verify PS DDR initialization with the target board software flow]
+    B[Build this project with the target part and reference PS BD]
+    C[Program the generated bitstream]
+    D[Run a 4 KiB sanity test]
+    E{4 KiB test passes?}
+    F[Run a 16 MiB test]
+    G{16 MiB test passes?}
+    H[Run larger tests only after confirming the DDR range is safe]
+    X[Stop and debug clock, UART, PS DDR init, or address map]
+
+    A --> B --> C --> D --> E
+    E -- yes --> F --> G
+    E -- no --> X
+    G -- yes --> H
+    G -- no --> X
 ```
 
 ## Top-Level Architecture
 
-```text
-                    Host PC
-                      |
-                      | USB UART, COM6, 8 Mbps, 8N1
-                      |
-              +-------+--------+
-              | FT232/USB UART |
-              +-------+--------+
-                      |
-                      | uart_rx / uart_tx
-                      |
-+---------------------+-------------------------------------------+
-|                         PL Fabric                               |
-|                                                                 |
-|  E12 200 MHz oscillator                                         |
-|       |                                                         |
-|       v                                                         |
-|   sys_clk --------------------------------------------------+    |
-|                                                             |    |
-|  +----------------------+                                   |    |
-|  | pl_ps_ddr_mem_test   |                                   |    |
-|  |                      |                                   |    |
-|  | UART RX/TX           |<-------- host command/result ---->|    |
-|  | command parser       |                                   |    |
-|  | pattern generator    |                                   |    |
-|  | AXI write engine     |                                   |    |
-|  | AXI read/check engine|                                   |    |
-|  | address translation  |  logical burst addr -> AXI addr  |    |
-|  | map_addr()           |  low direct / high DDR remap     |    |
-|  | result sender        |                                   |    |
-|  +----------+-----------+                                   |    |
-|             | M_AXI AWADDR/ARADDR after translation         |    |
-|             v                                               |    |
-|       +-----+------+                                        |    |
-|       | axi_smc_0  |  SmartConnect                          |    |
-|       +-----+------+                                        |    |
-|             | M00_AXI                                       |    |
-+-------------+-----------------------------------------------+----+
-              |
-              | S_AXI_HP0_FPD, 64-bit
-              v
-+-------------+-----------------------------------------------+
-|                       ZynqMP PS                              |
-|                                                             |
-|  S_AXI_HP0_FPD -> PS interconnect -> DDR controller -> DDR  |
-|                                                             |
-+-------------------------------------------------------------+
+```mermaid
+flowchart TB
+    Host["Host PC<br/>Python control script"]
+    Usb["FT232 / USB UART<br/>COM6, 8 Mbps, 8N1"]
+    Clk["E12 oscillator<br/>external 200 MHz"]
+
+    Host <-->|START / QUERY_CONFIG<br/>ACK / MAP_CONFIG / RESULT| Usb
+    Clk --> SysClk
+
+    subgraph PL["PL Fabric"]
+        SysClk["sys_clk"]
+
+        subgraph Tester["pl_ps_ddr_mem_test"]
+            Aclk["aclk"]
+            Uart["UART RX/TX"]
+            Parser["Command parser"]
+            Active["Active command and map registers"]
+            Write["AXI write engine"]
+            Read["AXI read/check engine"]
+            Map["Address translation<br/>map_addr()<br/>logical burst address to AXI address"]
+            Result["Result sender"]
+
+            Uart --> Parser
+            Parser --> Active
+            Active --> Write
+            Write --> Map
+            Active --> Read
+            Read --> Map
+            Read --> Result
+            Result --> Uart
+        end
+
+        SysClk -.-> Aclk
+        SysClk -.-> Smc["axi_smc_0<br/>SmartConnect"]
+        Map -->|M_AXI after translation| Smc
+    end
+
+    Usb <-->|uart_rx / uart_tx| Uart
+
+    Smc -->|M00_AXI| HpPort
+
+    subgraph PS["ZynqMP PS"]
+        direction LR
+        HpPort["S_AXI_HP0_FPD<br/>64-bit slave port"]
+        HpPort --> Interconnect["PS interconnect"]
+        Interconnect --> DdrCtrl["DDR controller"]
+        DdrCtrl --> Ddr["4 GiB DDR4"]
+    end
+
+    classDef fabric fill:#e8f1ff,stroke:#3b82f6,stroke-width:1px,color:#0f172a
+    classDef tester fill:#bfdbfe,stroke:#1d4ed8,stroke-width:2px,color:#0f172a
+    classDef clock fill:#fef3c7,stroke:#d97706,stroke-width:1px,color:#0f172a
+    class PL fabric
+    class Tester tester
+    class Clk,SysClk,Aclk clock
 ```
 
 ## Clock And Reset Architecture
@@ -375,20 +393,20 @@ The final design uses the external 200 MHz oscillator on PL pin E12 as the AXI
 and UART clock. The PS `pl_clk0` clock is no longer used as the DDR tester
 clock.
 
-```text
-E12 external 200 MHz oscillator
-    -> sys_clk top-level port
-    -> ddr_tester_0/aclk
-    -> axi_smc_0/aclk
-    -> zynq_ultra_ps_e_0/saxihp0_fpd_aclk
+```mermaid
+flowchart LR
+    Osc[E12 external 200 MHz oscillator] --> SysClk[sys_clk top-level port]
+    SysClk --> TesterClk[ddr_tester_0/aclk]
+    SysClk --> SmcClk[axi_smc_0/aclk]
+    SysClk --> HpClk[zynq_ultra_ps_e_0/saxihp0_fpd_aclk]
 ```
 
 Reset still comes from PS fabric reset:
 
-```text
-zynq_ultra_ps_e_0/pl_resetn0
-    -> ddr_tester_0/aresetn
-    -> axi_smc_0/aresetn
+```mermaid
+flowchart LR
+    PsReset[zynq_ultra_ps_e_0/pl_resetn0] --> TesterReset[ddr_tester_0/aresetn]
+    PsReset --> SmcReset[axi_smc_0/aresetn]
 ```
 
 Clock constraints are in `constraints/uart_zu4ev.xdc`:
@@ -403,43 +421,59 @@ set_property IOSTANDARD LVCMOS25 [get_ports sys_clk]
 
 The write/read/verify data flow is:
 
-```text
-1. Host sends START frame over UART.
-2. FPGA command parser validates frame, address alignment, and test size.
-3. FPGA replies with ACK.
-4. If write is enabled:
-   FPGA writes a deterministic lane-safe pattern to DDR through AXI.
-5. If read/verify is enabled:
-   FPGA reads the same DDR range through AXI.
-6. FPGA compares read data against the expected pattern.
-7. FPGA records total write cycles, total read cycles, error count, and first
-   mismatch debug fields.
-8. FPGA sends RESULT frame over UART.
-9. Host decodes RESULT and computes time and MiB/s from raw cycle counts.
+```mermaid
+flowchart TD
+    A[Host sends START frame over UART]
+    B[FPGA validates checksum, command fields, alignment, and size]
+    C[FPGA sends ACK]
+    D{Write enabled?}
+    E[Write lane-safe pattern to translated DDR range through AXI]
+    F{Read or verify enabled?}
+    G[Read the same translated DDR range through AXI]
+    H{Write was enabled?}
+    I[Compare read data against expected lane-safe pattern]
+    J[Record cycles, error_count, and first mismatch fields]
+    K[FPGA sends RESULT]
+    L[Host decodes RESULT and computes seconds and MiB/s]
+
+    A --> B --> C --> D
+    D -- yes --> E --> F
+    D -- no --> F
+    F -- yes --> G --> H
+    F -- no --> J
+    H -- yes --> I --> J
+    H -- no --> J
+    J --> K --> L
 ```
 
 The AXI write data path is:
 
-```text
-pattern generator
-    -> AXI WDATA
-    -> ddr_tester_0/M_AXI
-    -> axi_smc_0
-    -> PS S_AXI_HP0_FPD
-    -> PS DDR controller
-    -> DDR memory
+```mermaid
+flowchart LR
+    Pattern[Lane-safe pattern generator] --> WData[AXI WDATA]
+    Active[Active base/map registers] --> Addr[map_addr logical burst address to AWADDR]
+    Addr --> Master[ddr_tester_0 M_AXI write address channel]
+    WData --> Master
+    Master --> Smc[axi_smc_0 SmartConnect]
+    Smc --> Hp[PS S_AXI_HP0_FPD]
+    Hp --> Ctrl[PS DDR controller]
+    Ctrl --> Ddr[DDR memory]
 ```
 
 The AXI read/check path is:
 
-```text
-DDR memory
-    -> PS DDR controller
-    -> PS S_AXI_HP0_FPD
-    -> axi_smc_0
-    -> ddr_tester_0/M_AXI RDATA
-    -> expected-pattern comparator
-    -> error counter / first mismatch registers
+```mermaid
+flowchart LR
+    Active[Active base/map registers] --> Addr[map_addr logical burst address to ARADDR]
+    Addr --> Master[ddr_tester_0 M_AXI read address channel]
+    Master --> Smc[axi_smc_0 SmartConnect]
+    Smc --> Hp[PS S_AXI_HP0_FPD]
+    Hp --> Ctrl[PS DDR controller]
+    Ctrl --> Ddr[DDR memory]
+    Ddr --> RData[AXI RDATA]
+    Pattern[Expected lane-safe pattern] --> Compare[Comparator]
+    RData --> Compare
+    Compare --> Errors[error_count and first mismatch registers]
 ```
 
 ## Control Flow
@@ -447,20 +481,19 @@ DDR memory
 The host controls each test with one START frame. The FPGA responds with one ACK
 and then one RESULT frame.
 
-```text
-Host                                           FPGA
-----                                           ----
-build START frame
-send START  ---------------------------------> receive frame
-                                                check checksum
-                                                check command fields
-                  <-------------------------- send ACK
-                                                run write/read test
-                                                collect counters
-                  <-------------------------- send RESULT
-decode RESULT
-compute seconds and MiB/s
-print PASS/FAIL
+```mermaid
+sequenceDiagram
+    participant H as Host script
+    participant F as FPGA tester
+    H->>F: START frame
+    F->>F: Check checksum and command fields
+    F-->>H: ACK
+    F->>F: Run write/read/verify test
+    F->>F: Collect cycles and error information
+    F-->>H: RESULT frame
+    H->>H: Decode RESULT
+    H->>H: Compute seconds and MiB/s
+    H->>H: Print PASS/FAIL
 ```
 
 ## UART Protocol
@@ -1280,8 +1313,12 @@ with a deeper queue of pending writes.
 
 The data path includes SmartConnect and the PS HP interface:
 
-```text
-PL AXI master -> SmartConnect -> S_AXI_HP0_FPD -> PS interconnect -> DDR controller
+```mermaid
+flowchart LR
+    Master[PL AXI master] --> Smc[SmartConnect]
+    Smc --> Hp[S_AXI_HP0_FPD]
+    Hp --> PsInt[PS interconnect]
+    PsInt --> DdrCtrl[DDR controller]
 ```
 
 SmartConnect and the PS interconnect add latency. Latency is not a problem when
