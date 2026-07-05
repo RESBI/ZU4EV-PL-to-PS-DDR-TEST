@@ -1487,3 +1487,11 @@ ADDRESS_TRANSLATION_REPORT.md
 REPORT.md
     Engineering report summarizing design evolution and measurements.
 ```
+
+## License
+
+This project is released under the MIT License. See `LICENSE` for the full text.
+
+## AI Authorship Statement
+
+This project was completed with GPT-5.5.
