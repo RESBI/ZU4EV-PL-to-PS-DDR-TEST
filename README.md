@@ -370,7 +370,6 @@ flowchart TB
     Usb <-->|uart_rx / uart_tx| Uart
 
     subgraph PS["ZynqMP PS"]
-        direction LR
         HpPort["S_AXI_HP0_FPD<br/>64-bit slave port"]
         HpPort --> Interconnect["PS interconnect"]
         Interconnect --> DdrCtrl["DDR controller"]
