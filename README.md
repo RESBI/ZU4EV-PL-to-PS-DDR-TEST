@@ -378,12 +378,16 @@ flowchart TB
 
     Smc -->|M00_AXI| HpPort
 
-    classDef fabric fill:#fdf2f8,stroke:#ec4899,stroke-width:1px,color:#0f172a
-    classDef tester fill:#fbcfe8,stroke:#be185d,stroke-width:2px,color:#0f172a
+    classDef fabric fill:#e8f1ff,stroke:#3b82f6,stroke-width:1px,color:#0f172a
+    classDef tester fill:#bfdbfe,stroke:#1d4ed8,stroke-width:2px,color:#0f172a
+    classDef ps fill:#fdf2f8,stroke:#ec4899,stroke-width:1px,color:#0f172a
     classDef clock fill:#fef3c7,stroke:#d97706,stroke-width:1px,color:#0f172a
     class PL fabric
     class Tester tester
+    class PS ps
     class Clk,SysClk,Aclk clock
+
+    linkStyle default stroke:#334155,stroke-width:1.8px
 ```
 
 ## Clock And Reset Architecture
