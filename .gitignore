@@ -27,6 +27,16 @@ pl_ps_ddr_mem_test_proj/
 *.rpt
 *.rpx
 
+# XSA hardware platform
+*.xsa
+
+# Vitis workspace and FSBL build
+vitis_ws/
+
+# Boot image artifacts
+boot.bif
+BOOT.BIN
+
 # Python cache
 __pycache__/
 *.py[cod]
@@ -36,3 +46,13 @@ __pycache__/
 Thumbs.db
 *.swp
 *.tmp
+
+# Vivado crash dumps
+vivado_pid*.zip
+
+# psu_init build artifacts (psu_init.tcl IS tracked for boot_jtag.tcl)
+psu_init.c
+psu_init.h
+psu_init.html
+psu_init_gpl.c
+psu_init_gpl.h

@@ -150,6 +150,7 @@ set_property target_language Verilog [current_project]
 
 add_files -fileset sources_1 [list \
     $rtl_dir/config.vh \
+    $rtl_dir/pl_por.v \
     $rtl_dir/uart_rx.v \
     $rtl_dir/uart_tx.v \
     $rtl_dir/pl_ps_ddr_mem_test_top.v \
@@ -188,9 +189,18 @@ create_bd_port -dir I -type clk sys_clk
 set_property CONFIG.FREQ_HZ $pl_clk_hz [get_bd_ports sys_clk]
 
 connect_bd_net [get_bd_ports sys_clk] [get_bd_pins ddr_tester_0/aclk]
-connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_pins ddr_tester_0/aresetn]
 connect_bd_net [get_bd_ports sys_clk] [get_bd_pins axi_smc_0/aclk]
-connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_pins axi_smc_0/aresetn]
+
+# PL-local power-on reset. Decouples tester/interconnect reset from
+# pl_resetn0 so the UART debug path is alive right after bitstream load,
+# even before PS firmware runs. pl_por_0 holds everything reset for ~5 ms
+# after configuration, then releases.
+create_bd_cell -type module -reference pl_por pl_por_0
+set_property -dict [list CONFIG.CLK_HZ $pl_clk_hz CONFIG.RST_MS 5 CONFIG.USE_EXT_RST 0] [get_bd_cells pl_por_0]
+connect_bd_net [get_bd_ports sys_clk] [get_bd_pins pl_por_0/clk]
+connect_bd_net -quiet [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_pins pl_por_0/ext_rstn]
+connect_bd_net [get_bd_pins pl_por_0/rstn] [get_bd_pins ddr_tester_0/aresetn]
+connect_bd_net [get_bd_pins pl_por_0/rstn] [get_bd_pins axi_smc_0/aresetn]
 
 set hp_clock_connected 0
 foreach pin_name {saxihp0_fpd_aclk saxigp0_aclk saxihpc0_fpd_aclk maxihpm0_lpd_aclk maxihpm0_fpd_aclk} {
@@ -284,4 +294,19 @@ if {[llength $bit_files] > 0} {
 } else {
     puts "ERROR: Bitstream not found"
     exit 1
+}
+
+puts ""
+puts "--- Exporting Hardware Platform (XSA) ---"
+set xsa_file "./pl_ps_ddr_mem_test.xsa"
+if {[catch {write_hw_platform -fixed -include_bit -force $xsa_file} err]} {
+    puts "WARNING: write_hw_platform failed: $err"
+    puts "        Falling back to write_sysdef."
+    set sysdef_file "$proj_dir/$proj_name.data/sysdef.xml"
+    if {[catch {write_sysdef -force $sysdef_file [get_files $proj_dir/$proj_name.srcs/sources_1/bd/system/system.bd] [lindex $bit_files 0]} err2]} {
+        puts "WARNING: write_sysdef also failed: $err2"
+    }
+}
+if {[file exists $xsa_file]} {
+    puts "XSA exported: [file normalize $xsa_file]"
 }
