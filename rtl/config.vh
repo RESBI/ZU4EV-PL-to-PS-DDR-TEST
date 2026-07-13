@@ -2,7 +2,7 @@
 `define CONFIG_VH
 
 `ifndef CFG_CLK_HZ
-`define CFG_CLK_HZ 200000000
+`define CFG_CLK_HZ 225000000
 `endif
 
 `ifndef CFG_UART_BAUD

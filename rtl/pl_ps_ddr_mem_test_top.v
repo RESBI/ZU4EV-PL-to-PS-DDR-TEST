@@ -8,7 +8,7 @@ module pl_ps_ddr_mem_test_top #(
     parameter [31:0]  TEST_BYTES = 32'h0100_0000,
     parameter integer AXI_DATA_WIDTH = 64,
     parameter integer AXI_ADDR_WIDTH = 64,
-    parameter integer BURST_BEATS = 16
+    parameter integer BURST_BEATS = 64
 ) (
     input  wire                         aclk,
     input  wire                         aresetn,
@@ -86,6 +86,9 @@ module pl_ps_ddr_mem_test_top #(
 
     localparam integer AXI_STRB_WIDTH = AXI_DATA_WIDTH / 8;
     localparam integer BURST_BYTES = AXI_STRB_WIDTH * BURST_BEATS;
+    localparam integer BURST_SHIFT = $clog2(BURST_BYTES);
+    localparam integer WRITE_OUTSTANDING = 4;
+    localparam integer READ_OUTSTANDING = 4;
     localparam FLAG_WRITE = 8'h01;
     localparam FLAG_READ_VERIFY = 8'h02;
     localparam RESP_OK = 8'h00;
@@ -206,15 +209,6 @@ module pl_ps_ddr_mem_test_top #(
         .first_actual  (first_error_actual)
     );
 
-    function [63:0] pattern64;
-        input [31:0] idx;
-        input [31:0] seed;
-        begin
-            pattern64 = {32'hA5A5_0000 ^ idx ^ seed,
-                         32'h5A5A_0000 ^ {idx[15:0], idx[31:16]} ^ 32'h3C6E_F35F ^ {seed[15:0], seed[31:16]}};
-        end
-    endfunction
-
     function [31:0] pattern32;
         input [31:0] idx;
         input [31:0] seed;
@@ -223,13 +217,13 @@ module pl_ps_ddr_mem_test_top #(
         end
     endfunction
 
-    function [63:0] pattern_lane_safe;
+    function [AXI_DATA_WIDTH-1:0] pattern_lane_safe;
         input [31:0] idx;
         input [31:0] seed;
         reg [31:0] p;
         begin
             p = pattern32(idx >> 1, seed);
-            pattern_lane_safe = {p, p};
+            pattern_lane_safe = {(AXI_DATA_WIDTH/32){p}};
         end
     endfunction
 
@@ -251,28 +245,45 @@ module pl_ps_ddr_mem_test_top #(
     reg [31:0] burst_index = 32'd0;
     reg [31:0] write_beat_index = 32'd0;
     reg [31:0] read_beat_index = 32'd0;
-    reg [7:0]  burst_beat = 8'd0;
+    reg [31:0] aw_issued = 32'd0;
+    reg [31:0] w_burst = 32'd0;
+    reg [7:0]  w_beat = 8'd0;
+    reg [31:0] wr_outstanding = 32'd0;
+    reg [31:0] ar_issued = 32'd0;
+    reg [31:0] r_burst = 32'd0;
+    reg [31:0] rd_outstanding = 32'd0;
     reg [63:0] write_cycles = 64'd0;
     reg [63:0] read_cycles = 64'd0;
     reg [31:0] error_count = 32'd0;
     reg [31:0] first_error_index = 32'd0;
     reg [63:0] first_error_expected = 64'd0;
     reg [63:0] first_error_actual = 64'd0;
-    wire [63:0] expected_rdata = pattern_lane_safe(read_beat_index, active_seed);
+    wire [AXI_DATA_WIDTH-1:0] expected_rdata = pattern_lane_safe(read_beat_index, active_seed);
 
     localparam ST_IDLE     = 4'd0;
-    localparam ST_WRITE_AW = 4'd1;
-    localparam ST_WRITE_W  = 4'd2;
-    localparam ST_WRITE_B  = 4'd3;
-    localparam ST_READ_AR  = 4'd4;
-    localparam ST_READ_R   = 4'd5;
-    localparam ST_REPORT   = 4'd6;
+    localparam ST_WRITE    = 4'd1;
+    localparam ST_READ     = 4'd2;
+    localparam ST_REPORT   = 4'd3;
 
     wire busy = (state != ST_IDLE) || result_valid;
     wire bad_align = (cmd_base[6:0] != 7'd0);
-    wire bad_size = (cmd_bytes == 64'd0) || (cmd_bytes[6:0] != 7'd0) || (cmd_bytes > 64'h0000_0001_0000_0000);
+    wire bad_size = (cmd_bytes == 64'd0) || (cmd_bytes[BURST_SHIFT-1:0] != {BURST_SHIFT{1'b0}}) || (cmd_bytes > 64'h0000_0001_0000_0000);
     wire bad_map_align = cmd_map_flags[0] && ((cmd_logical_split[6:0] != 7'd0) || (cmd_physical_high_base[6:0] != 7'd0));
-    wire [31:0] cmd_bursts = cmd_bytes >> 7;
+    wire [31:0] cmd_bursts = cmd_bytes >> BURST_SHIFT;
+
+    wire aw_fire = m_axi_awvalid && m_axi_awready;
+    wire b_fire  = m_axi_bvalid && m_axi_bready;
+    wire w_fire  = m_axi_wvalid && m_axi_wready;
+    wire w_last_fire = w_fire && wlast_r;
+    wire ar_fire = m_axi_arvalid && m_axi_arready;
+    wire r_fire  = m_axi_rvalid && m_axi_rready;
+    wire r_last_fire = r_fire && m_axi_rlast;
+    wire [31:0] aw_issued_next = aw_issued + (aw_fire ? 32'd1 : 32'd0);
+    wire [31:0] w_burst_next = w_burst + (w_last_fire ? 32'd1 : 32'd0);
+    wire [31:0] outstanding_next = wr_outstanding + (aw_fire ? 32'd1 : 32'd0) - (b_fire ? 32'd1 : 32'd0);
+    wire [31:0] ar_issued_next = ar_issued + (ar_fire ? 32'd1 : 32'd0);
+    wire [31:0] r_burst_next = r_burst + (r_last_fire ? 32'd1 : 32'd0);
+    wire [31:0] rd_outstanding_next = rd_outstanding + (ar_fire ? 32'd1 : 32'd0) - (r_last_fire ? 32'd1 : 32'd0);
 
     always @(posedge aclk) begin
         if (!aresetn) begin
@@ -288,7 +299,13 @@ module pl_ps_ddr_mem_test_top #(
             burst_index <= 32'd0;
             write_beat_index <= 32'd0;
             read_beat_index <= 32'd0;
-            burst_beat <= 8'd0;
+            aw_issued <= 32'd0;
+            w_burst <= 32'd0;
+            w_beat <= 8'd0;
+            wr_outstanding <= 32'd0;
+            ar_issued <= 32'd0;
+            r_burst <= 32'd0;
+            rd_outstanding <= 32'd0;
             write_cycles <= 64'd0;
             read_cycles <= 64'd0;
             error_count <= 32'd0;
@@ -344,7 +361,13 @@ module pl_ps_ddr_mem_test_top #(
                     burst_index <= 32'd0;
                     write_beat_index <= 32'd0;
                     read_beat_index <= 32'd0;
-                    burst_beat <= 8'd0;
+                    aw_issued <= 32'd0;
+                    w_burst <= 32'd0;
+                    w_beat <= 8'd0;
+                    wr_outstanding <= 32'd0;
+                    ar_issued <= 32'd0;
+                    r_burst <= 32'd0;
+                    rd_outstanding <= 32'd0;
                     write_cycles <= 64'd0;
                     read_cycles <= 64'd0;
                     error_count <= 32'd0;
@@ -357,10 +380,13 @@ module pl_ps_ddr_mem_test_top #(
                         wdata_r <= pattern_lane_safe(32'd0, cmd_seed);
                         wlast_r <= (BURST_BEATS == 1);
                         m_axi_awvalid <= 1'b1;
-                        state <= ST_WRITE_AW;
+                        m_axi_wvalid <= 1'b0;
+                        m_axi_bready <= 1'b0;
+                        state <= ST_WRITE;
                     end else begin
                         m_axi_arvalid <= 1'b1;
-                        state <= ST_READ_AR;
+                        m_axi_rready <= 1'b0;
+                        state <= ST_READ;
                     end
                 end
             end
@@ -376,84 +402,113 @@ module pl_ps_ddr_mem_test_top #(
                     end
                 end
 
-                ST_WRITE_AW: begin
+                ST_WRITE: begin
                     write_cycles <= write_cycles + 1'b1;
-                    if (m_axi_awvalid && m_axi_awready) begin
+
+                    if (!m_axi_awvalid) begin
+                        if (aw_issued < active_bursts &&
+                            (wr_outstanding - (b_fire ? 32'd1 : 32'd0)) < WRITE_OUTSTANDING) begin
+                            m_axi_awvalid <= 1'b1;
+                            m_axi_awaddr <= map_addr(active_base + ({{32'd0}, aw_issued} << BURST_SHIFT),
+                                                      active_map_flags, active_logical_split, active_physical_high_base);
+                        end
+                    end else if (aw_fire) begin
+                        if (aw_issued + 32'd1 < active_bursts &&
+                            (wr_outstanding + 32'd1 - (b_fire ? 32'd1 : 32'd0)) < WRITE_OUTSTANDING) begin
+                            m_axi_awvalid <= 1'b1;
+                            m_axi_awaddr <= map_addr(active_base + ({{32'd0}, aw_issued + 32'd1} << BURST_SHIFT),
+                                                      active_map_flags, active_logical_split, active_physical_high_base);
+                        end else begin
+                            m_axi_awvalid <= 1'b0;
+                        end
+                    end
+
+                    if (w_burst < aw_issued) begin
+                        if (!m_axi_wvalid) begin
+                            m_axi_wvalid <= 1'b1;
+                            wdata_r <= pattern_lane_safe(write_beat_index, active_seed);
+                            wlast_r <= (w_beat == BURST_BEATS - 1);
+                        end
+                        if (w_fire) begin
+                            write_beat_index <= write_beat_index + 1'b1;
+                            if (w_beat == BURST_BEATS - 1) begin
+                                w_burst <= w_burst + 1'b1;
+                                w_beat <= 8'd0;
+                                if (w_burst + 32'd1 < aw_issued) begin
+                                    m_axi_wvalid <= 1'b1;
+                                    wdata_r <= pattern_lane_safe(write_beat_index + 1'b1, active_seed);
+                                    wlast_r <= (BURST_BEATS == 1);
+                                end else begin
+                                    m_axi_wvalid <= 1'b0;
+                                end
+                            end else begin
+                                w_beat <= w_beat + 1'b1;
+                                wdata_r <= pattern_lane_safe(write_beat_index + 1'b1, active_seed);
+                                wlast_r <= (w_beat + 1'b1 == BURST_BEATS - 1);
+                            end
+                        end
+                    end else begin
+                        m_axi_wvalid <= 1'b0;
+                    end
+
+                    m_axi_bready <= 1'b1;
+                    if (b_fire && m_axi_bresp != 2'b00 && error_count != 32'hFFFF_FFFF) begin
+                        error_count <= error_count + 1'b1;
+                    end
+
+                    aw_issued <= aw_issued_next;
+                    wr_outstanding <= outstanding_next;
+
+                    if (aw_issued_next == active_bursts && w_burst_next == active_bursts && outstanding_next == 32'd0) begin
                         m_axi_awvalid <= 1'b0;
                         m_axi_wvalid <= 1'b0;
-                        burst_beat <= 8'd0;
-                        wdata_r <= pattern_lane_safe(write_beat_index, active_seed);
-                        wlast_r <= (BURST_BEATS == 1);
-                        m_axi_wvalid <= 1'b1;
-                        state <= ST_WRITE_W;
-                    end
-                end
-
-                ST_WRITE_W: begin
-                    write_cycles <= write_cycles + 1'b1;
-                    if (m_axi_wvalid && m_axi_wready) begin
-                        m_axi_wvalid <= 1'b0;
-                        if (m_axi_wlast) begin
-                            m_axi_bready <= 1'b1;
-                            state <= ST_WRITE_B;
-                        end else begin
-                            burst_beat <= burst_beat + 1'b1;
-                            wdata_r <= pattern_lane_safe(write_beat_index + burst_beat + 1'b1, active_seed);
-                            wlast_r <= (burst_beat + 1'b1 == BURST_BEATS - 1);
-                            m_axi_wvalid <= 1'b1;
-                        end
-                    end
-                end
-
-                ST_WRITE_B: begin
-                    write_cycles <= write_cycles + 1'b1;
-                    if (m_axi_bvalid) begin
                         m_axi_bready <= 1'b0;
-                        if (m_axi_bresp != 2'b00 && error_count != 32'hFFFF_FFFF) begin
-                            error_count <= error_count + 1'b1;
-                        end
-                        if (burst_index == active_bursts - 1) begin
-                            burst_index <= 32'd0;
-                            if ((active_flags & FLAG_READ_VERIFY) != 0) begin
-                                m_axi_araddr <= map_addr(active_base, active_map_flags, active_logical_split, active_physical_high_base);
-                                m_axi_arvalid <= 1'b1;
-                                state <= ST_READ_AR;
-                            end else begin
-                                result_valid <= 1'b1;
-                                state <= ST_REPORT;
-                            end
+                        if ((active_flags & FLAG_READ_VERIFY) != 0) begin
+                            ar_issued <= 32'd0;
+                            r_burst <= 32'd0;
+                            rd_outstanding <= 32'd0;
+                            m_axi_araddr <= map_addr(active_base, active_map_flags, active_logical_split, active_physical_high_base);
+                            m_axi_arvalid <= 1'b1;
+                            m_axi_rready <= 1'b0;
+                            state <= ST_READ;
                         end else begin
-                            burst_index <= burst_index + 1'b1;
-                            write_beat_index <= write_beat_index + BURST_BEATS;
-                            m_axi_awaddr <= map_addr(active_base + (({32'd0, burst_index} + 64'd1) << 7), active_map_flags, active_logical_split, active_physical_high_base);
-                            m_axi_awvalid <= 1'b1;
-                            wdata_r <= pattern_lane_safe(write_beat_index + BURST_BEATS, active_seed);
-                            wlast_r <= (BURST_BEATS == 1);
-                            state <= ST_WRITE_AW;
+                            result_valid <= 1'b1;
+                            state <= ST_REPORT;
                         end
                     end
                 end
 
-                ST_READ_AR: begin
+                ST_READ: begin
                     read_cycles <= read_cycles + 1'b1;
-                    if (m_axi_arvalid && m_axi_arready) begin
-                        m_axi_arvalid <= 1'b0;
-                        m_axi_rready <= 1'b1;
-                        state <= ST_READ_R;
-                    end
-                end
 
-                ST_READ_R: begin
-                    read_cycles <= read_cycles + 1'b1;
-                    if (m_axi_rvalid && m_axi_rready) begin
+                    if (!m_axi_arvalid) begin
+                        if (ar_issued < active_bursts &&
+                            (rd_outstanding - (r_last_fire ? 32'd1 : 32'd0)) < READ_OUTSTANDING) begin
+                            m_axi_arvalid <= 1'b1;
+                            m_axi_araddr <= map_addr(active_base + ({{32'd0}, ar_issued} << BURST_SHIFT),
+                                                      active_map_flags, active_logical_split, active_physical_high_base);
+                        end
+                    end else if (ar_fire) begin
+                        if (ar_issued + 32'd1 < active_bursts &&
+                            (rd_outstanding + 32'd1 - (r_last_fire ? 32'd1 : 32'd0)) < READ_OUTSTANDING) begin
+                            m_axi_arvalid <= 1'b1;
+                            m_axi_araddr <= map_addr(active_base + ({{32'd0}, ar_issued + 32'd1} << BURST_SHIFT),
+                                                      active_map_flags, active_logical_split, active_physical_high_base);
+                        end else begin
+                            m_axi_arvalid <= 1'b0;
+                        end
+                    end
+
+                    m_axi_rready <= 1'b1;
+                    if (r_fire) begin
                         if (((active_flags & FLAG_WRITE) != 0) && (m_axi_rdata != expected_rdata)) begin
                             if (error_count != 32'hFFFF_FFFF) begin
                                 error_count <= error_count + 1'b1;
                             end
                             if (error_count == 32'd0) begin
                                 first_error_index <= read_beat_index;
-                                first_error_expected <= expected_rdata;
-                                first_error_actual <= m_axi_rdata;
+                                first_error_expected <= expected_rdata[63:0];
+                                first_error_actual <= m_axi_rdata[63:0];
                             end
                         end
                         if (m_axi_rresp != 2'b00 && error_count != 32'hFFFF_FFFF) begin
@@ -461,17 +516,18 @@ module pl_ps_ddr_mem_test_top #(
                         end
                         read_beat_index <= read_beat_index + 1'b1;
                         if (m_axi_rlast) begin
-                            m_axi_rready <= 1'b0;
-                            if (burst_index == active_bursts - 1) begin
-                                result_valid <= 1'b1;
-                                state <= ST_REPORT;
-                            end else begin
-                                burst_index <= burst_index + 1'b1;
-                                m_axi_araddr <= map_addr(active_base + (({32'd0, burst_index} + 64'd1) << 7), active_map_flags, active_logical_split, active_physical_high_base);
-                                m_axi_arvalid <= 1'b1;
-                                state <= ST_READ_AR;
-                            end
+                            r_burst <= r_burst + 1'b1;
                         end
+                    end
+
+                    ar_issued <= ar_issued_next;
+                    rd_outstanding <= rd_outstanding_next;
+
+                    if (ar_issued_next == active_bursts && r_burst_next == active_bursts && rd_outstanding_next == 32'd0) begin
+                        m_axi_arvalid <= 1'b0;
+                        m_axi_rready <= 1'b0;
+                        result_valid <= 1'b1;
+                        state <= ST_REPORT;
                     end
                 end
 
@@ -533,7 +589,7 @@ module command_parser (
             cmd_bytes <= 64'd0;
             cmd_seed <= 32'd0;
             cmd_flags <= 8'd0;
-            cmd_map_flags <= 8'd0;
+            cmd_map_flags <= 8'b0;
             cmd_logical_split <= 64'h0000_0000_8000_0000;
             cmd_physical_high_base <= 64'h0000_0008_0000_0000;
             query_valid <= 1'b0;

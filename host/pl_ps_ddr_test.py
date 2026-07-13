@@ -171,7 +171,7 @@ def main():
     parser = argparse.ArgumentParser(description="Host script for PL-to-PS DDR UART test")
     parser.add_argument("--port", default="COM6")
     parser.add_argument("--baud", type=int, default=8_000_000)
-    parser.add_argument("--clk-hz", type=float, default=200_000_000.0, help="PL clock frequency used for speed calculation")
+    parser.add_argument("--clk-hz", type=float, default=225_000_000.0, help="PL clock frequency used for speed calculation")
     parser.add_argument("--base", type=parse_int, default=0x10000000)
     parser.add_argument("--bytes", dest="test_bytes", type=parse_int, default=0x01000000)
     parser.add_argument("--seed", type=parse_int, default=0x13579BDF)

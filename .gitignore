@@ -56,3 +56,6 @@ psu_init.h
 psu_init.html
 psu_init_gpl.c
 psu_init_gpl.h
+
+# Stage optimization build logs and temp files
+test/

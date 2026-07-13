@@ -7,8 +7,8 @@ set ref_bd_file "./reference/design_1.bd"
 
 set test_base_addr "0x0000000010000000"
 set test_bytes     "0x01000000"
-set pl_clk_mhz     "200.000000"
-set pl_clk_hz      "200000000"
+set pl_clk_mhz     "225.000000"
+set pl_clk_hz      "225000000"
 set uart_baud      "8000000"
 
 proc set_ps_property_if_exists {cell prop value} {
@@ -186,10 +186,32 @@ create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:* axi_smc_0
 set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 1] [get_bd_cells axi_smc_0]
 
 create_bd_port -dir I -type clk sys_clk
-set_property CONFIG.FREQ_HZ $pl_clk_hz [get_bd_ports sys_clk]
+set_property CONFIG.FREQ_HZ 200000000 [get_bd_ports sys_clk]
 
-connect_bd_net [get_bd_ports sys_clk] [get_bd_pins ddr_tester_0/aclk]
-connect_bd_net [get_bd_ports sys_clk] [get_bd_pins axi_smc_0/aclk]
+# MMCM to upscale 200 MHz oscillator to 225 MHz AXI clock
+create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz:* clk_wiz_0
+set_property -dict [list \
+    CONFIG.PRIM_IN_FREQ 200.000 \
+    CONFIG.PRIM_SOURCE Global_buffer \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ 225.000 \
+    CONFIG.CLKOUT2_REQUESTED_OUT_FREQ 200.000 \
+    CONFIG.CLKOUT2_USED true \
+    CONFIG.CLKOUT3_USED false \
+    CONFIG.CLKOUT4_USED false \
+    CONFIG.CLKOUT5_USED false \
+    CONFIG.CLKOUT6_USED false \
+    CONFIG.CLKOUT7_USED false \
+    CONFIG.USE_LOCKED true \
+    CONFIG.USE_RESET false \
+    CONFIG.USE_PHASE_ALIGNMENT false \
+    CONFIG.CLKOUT1_DRIVES BUFG \
+    CONFIG.CLKOUT2_DRIVES BUFG \
+] [get_bd_cells clk_wiz_0]
+connect_bd_net [get_bd_ports sys_clk] [get_bd_pins clk_wiz_0/clk_in1]
+
+# AXI clock is MMCM output (225 MHz); pass-through 200 MHz output unused
+connect_bd_net [get_bd_pins clk_wiz_0/clk_out1] [get_bd_pins ddr_tester_0/aclk]
+connect_bd_net [get_bd_pins clk_wiz_0/clk_out1] [get_bd_pins axi_smc_0/aclk]
 
 # PL-local power-on reset. Decouples tester/interconnect reset from
 # pl_resetn0 so the UART debug path is alive right after bitstream load,
@@ -197,14 +219,14 @@ connect_bd_net [get_bd_ports sys_clk] [get_bd_pins axi_smc_0/aclk]
 # after configuration, then releases.
 create_bd_cell -type module -reference pl_por pl_por_0
 set_property -dict [list CONFIG.CLK_HZ $pl_clk_hz CONFIG.RST_MS 5 CONFIG.USE_EXT_RST 0] [get_bd_cells pl_por_0]
-connect_bd_net [get_bd_ports sys_clk] [get_bd_pins pl_por_0/clk]
+connect_bd_net [get_bd_pins clk_wiz_0/clk_out1] [get_bd_pins pl_por_0/clk]
 connect_bd_net -quiet [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_pins pl_por_0/ext_rstn]
 connect_bd_net [get_bd_pins pl_por_0/rstn] [get_bd_pins ddr_tester_0/aresetn]
 connect_bd_net [get_bd_pins pl_por_0/rstn] [get_bd_pins axi_smc_0/aresetn]
 
 set hp_clock_connected 0
 foreach pin_name {saxihp0_fpd_aclk saxigp0_aclk saxihpc0_fpd_aclk maxihpm0_lpd_aclk maxihpm0_fpd_aclk} {
-    if {[connect_bd_pin_if_exists sys_clk zynq_ultra_ps_e_0/$pin_name]} {
+    if {[connect_bd_pin_if_exists clk_wiz_0/clk_out1 zynq_ultra_ps_e_0/$pin_name]} {
         set hp_clock_connected 1
     }
 }
